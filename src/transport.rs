@@ -1,9 +1,9 @@
-use std::io::Read;
 use std::time::Duration;
 
 use regex::Regex;
 use reqwest::header::CONTENT_TYPE;
 
+use crate::input::python_rstrip;
 use crate::posting::{EncodedBody, UploadPlan};
 use crate::{AppError, AppResult, VERSION};
 
@@ -19,18 +19,24 @@ pub trait Transport {
 }
 
 pub struct ReqwestTransport {
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl ReqwestTransport {
     pub fn new() -> AppResult<Self> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(15))
+            .read_timeout(Duration::from_secs(15))
             .user_agent(format!("Pastebinit v{VERSION}"))
             .build()
             .map_err(AppError::input)?;
-        Ok(Self { client })
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .map_err(AppError::input)?;
+        Ok(Self { client, runtime })
     }
 }
 
@@ -40,18 +46,21 @@ impl Transport for ReqwestTransport {
             EncodedBody::Form(body) => (body, "application/x-www-form-urlencoded"),
             EncodedBody::Json(body) => (body, "text/json"),
         };
-        let mut response = self
-            .client
-            .post(&plan.url)
-            .header(CONTENT_TYPE, content_type)
-            .body(body.clone())
-            .send()
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(AppError::input)?;
-        let final_url = response.url().to_string();
-        let mut response_body = Vec::new();
-        response
-            .read_to_end(&mut response_body)
+        let (final_url, response_body) = self
+            .runtime
+            .block_on(async {
+                let response = self
+                    .client
+                    .post(&plan.url)
+                    .header(CONTENT_TYPE, content_type)
+                    .body(body.clone())
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                let final_url = response.url().to_string();
+                let response_body = response.bytes().await?.to_vec();
+                Ok::<_, reqwest::Error>((final_url, response_body))
+            })
             .map_err(AppError::input)?;
         Ok(HttpResponse {
             final_url,
@@ -69,9 +78,7 @@ pub fn extract_paste_url(plan: &UploadPlan, final_url: &str, body: &[u8]) -> App
     let Some(pattern) = &plan.response_pattern else {
         return Ok(final_url.to_owned());
     };
-    let result = std::str::from_utf8(body)
-        .map_err(|_| result_page_error())?
-        .trim();
+    let result = python_rstrip(std::str::from_utf8(body).map_err(|_| result_page_error())?);
     if pattern == "(.*)" {
         return Ok(result.to_owned());
     }
@@ -85,7 +92,7 @@ pub fn extract_paste_url(plan: &UploadPlan, final_url: &str, body: &[u8]) -> App
         &result[matched.end()..]
     };
     match &plan.target_url {
-        Some(target_url) if target_url.contains("%s") => {
+        Some(target_url) if target_url.contains('%') => {
             python_percent_format(target_url, extracted)
         }
         Some(target_url) => Ok(format!("{target_url}{extracted}")),
@@ -95,20 +102,60 @@ pub fn extract_paste_url(plan: &UploadPlan, final_url: &str, body: &[u8]) -> App
 
 fn python_percent_format(template: &str, value: &str) -> AppResult<String> {
     let mut output = String::new();
-    let mut characters = template.chars();
+    let characters: Vec<char> = template.chars().collect();
+    let mut position = 0;
     let mut substitutions = 0;
-    while let Some(character) = characters.next() {
+    while let Some(&character) = characters.get(position) {
+        position += 1;
         if character != '%' {
             output.push(character);
             continue;
         }
-        match characters.next() {
-            Some('%') => output.push('%'),
-            Some('s') if substitutions == 0 => {
-                output.push_str(value);
-                substitutions += 1;
+        if characters.get(position) == Some(&'%') {
+            output.push('%');
+            position += 1;
+            continue;
+        }
+
+        let flags_start = position;
+        while matches!(characters.get(position), Some('#' | '0' | '-' | ' ' | '+')) {
+            position += 1;
+        }
+        let width_start = position;
+        while matches!(characters.get(position), Some('0'..='9')) {
+            position += 1;
+        }
+        let width = parse_format_number(&characters[width_start..position])?;
+        let precision = if characters.get(position) == Some(&'.') {
+            position += 1;
+            let precision_start = position;
+            while matches!(characters.get(position), Some('0'..='9')) {
+                position += 1;
             }
-            _ => return Err(result_page_error()),
+            Some(parse_format_number(&characters[precision_start..position])?.unwrap_or(0))
+        } else {
+            None
+        };
+        if matches!(characters.get(position), Some('h' | 'l' | 'L')) {
+            position += 1;
+        }
+        if characters.get(position) != Some(&'s') || substitutions != 0 {
+            return Err(result_page_error());
+        }
+        position += 1;
+        substitutions += 1;
+
+        let value: String = value
+            .chars()
+            .take(precision.unwrap_or(usize::MAX))
+            .collect();
+        let padding = width.unwrap_or(0).saturating_sub(value.chars().count());
+        if !characters[flags_start..width_start].contains(&'-') {
+            output.extend(std::iter::repeat_n(' ', padding));
+            output.push_str(&value);
+        } else {
+            output.push_str(&value);
+            output.extend(std::iter::repeat_n(' ', padding));
         }
     }
     if substitutions == 1 {
@@ -116,6 +163,18 @@ fn python_percent_format(template: &str, value: &str) -> AppResult<String> {
     } else {
         Err(result_page_error())
     }
+}
+
+fn parse_format_number(characters: &[char]) -> AppResult<Option<usize>> {
+    if characters.is_empty() {
+        return Ok(None);
+    }
+    characters
+        .iter()
+        .collect::<String>()
+        .parse()
+        .map(Some)
+        .map_err(|_| result_page_error())
 }
 
 fn result_page_error() -> AppError {
