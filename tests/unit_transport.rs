@@ -155,6 +155,7 @@ fn invalid_regex_and_absent_optional_capture_use_the_reference_error() {
 #[test]
 fn invalid_percent_directives_use_the_reference_error() {
     for target_url in [
+        "https://example.test/show",
         "https://example.test/%%s",
         "https://example.test/%q",
         "https://example.test/%*s",
@@ -173,6 +174,23 @@ fn invalid_percent_directives_use_the_reference_error() {
         .unwrap_err();
         assert_eq!(error.message(), RESULT_PAGE_ERROR);
     }
+}
+
+#[test]
+fn synchronous_transport_submits_without_an_async_runtime() {
+    let server = FixtureServer::spawn(vec![ResponseSpec::text(200, "https://paste.test/42")]);
+    let upload_plan = plan(
+        format!("{}/submit", server.url()),
+        format!("{}/", server.url()),
+        EncodedBody::Form(Vec::new()),
+        Some("(.*)"),
+        None,
+    );
+    assert_eq!(
+        submit_upload(&ReqwestTransport::new().unwrap(), &upload_plan).unwrap(),
+        "https://paste.test/42"
+    );
+    let _ = server.next_request();
 }
 
 #[test]

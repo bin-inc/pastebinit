@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::time::Duration;
 
 use regex::Regex;
@@ -19,24 +20,18 @@ pub trait Transport {
 }
 
 pub struct ReqwestTransport {
-    client: reqwest::Client,
-    runtime: tokio::runtime::Runtime,
+    client: reqwest::blocking::Client,
 }
 
 impl ReqwestTransport {
     pub fn new() -> AppResult<Self> {
-        let client = reqwest::Client::builder()
+        let client = reqwest::blocking::Client::builder()
             .connect_timeout(Duration::from_secs(15))
-            .read_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(15))
             .user_agent(format!("Pastebinit v{VERSION}"))
             .build()
             .map_err(AppError::input)?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .map_err(AppError::input)?;
-        Ok(Self { client, runtime })
+        Ok(Self { client })
     }
 }
 
@@ -46,21 +41,18 @@ impl Transport for ReqwestTransport {
             EncodedBody::Form(body) => (body, "application/x-www-form-urlencoded"),
             EncodedBody::Json(body) => (body, "text/json"),
         };
-        let (final_url, response_body) = self
-            .runtime
-            .block_on(async {
-                let response = self
-                    .client
-                    .post(&plan.url)
-                    .header(CONTENT_TYPE, content_type)
-                    .body(body.clone())
-                    .send()
-                    .await?
-                    .error_for_status()?;
-                let final_url = response.url().to_string();
-                let response_body = response.bytes().await?.to_vec();
-                Ok::<_, reqwest::Error>((final_url, response_body))
-            })
+        let mut response = self
+            .client
+            .post(&plan.url)
+            .header(CONTENT_TYPE, content_type)
+            .body(body.clone())
+            .send()
+            .and_then(reqwest::blocking::Response::error_for_status)
+            .map_err(AppError::input)?;
+        let final_url = response.url().to_string();
+        let mut response_body = Vec::new();
+        response
+            .read_to_end(&mut response_body)
             .map_err(AppError::input)?;
         Ok(HttpResponse {
             final_url,
@@ -91,13 +83,10 @@ pub fn extract_paste_url(plan: &UploadPlan, final_url: &str, body: &[u8]) -> App
         let matched = captures.get(0).expect("successful captures has full match");
         &result[matched.end()..]
     };
-    match &plan.target_url {
-        Some(target_url) if target_url.contains('%') => {
-            python_percent_format(target_url, extracted)
-        }
-        Some(target_url) => Ok(format!("{target_url}{extracted}")),
-        None => Ok(format!("{}{extracted}", plan.base_url)),
-    }
+    plan.target_url.as_deref().map_or_else(
+        || Ok(format!("{}{extracted}", plan.base_url)),
+        |target_url| python_percent_format(target_url, extracted),
+    )
 }
 
 fn python_percent_format(template: &str, value: &str) -> AppResult<String> {

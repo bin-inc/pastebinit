@@ -743,7 +743,6 @@ dependencies = [
  "reqwest",
  "signal-hook",
  "tempfile",
- "tokio",
 ]
 
 [[package]]
