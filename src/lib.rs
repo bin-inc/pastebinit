@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod platform;
+pub mod preferences;
 
 pub use error::{AppError, AppResult};
 
