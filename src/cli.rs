@@ -67,7 +67,7 @@ where
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let matches = command()
         .try_get_matches_from(args)
-        .map_err(|error| AppError::usage(error.to_string()))?;
+        .map_err(|error| AppError::usage(argparse_error(&error.to_string())))?;
     if matches.get_flag("help") {
         return Ok(CliOutcome::Help(render_help(defaults)));
     }
@@ -91,6 +91,30 @@ where
         username: value(&matches, "username"),
         password: value(&matches, "password"),
     }))
+}
+
+fn argparse_error(error: &str) -> String {
+    let detail = if let Some(argument) = error
+        .strip_prefix("error: unexpected argument '")
+        .and_then(|value| value.split_once("' found"))
+        .map(|(argument, _)| argument)
+    {
+        format!("unrecognized arguments: {argument}")
+    } else if let Some(argument) = error
+        .strip_prefix("error: a value is required for '")
+        .and_then(|value| value.split_once("' but none was supplied"))
+        .map(|(argument, _)| argument)
+    {
+        if argument == "-i <FILE>..." {
+            "argument -i: expected at least one argument".into()
+        } else {
+            let argument = argument.split_whitespace().next().unwrap_or(argument);
+            format!("argument {argument}: expected one argument")
+        }
+    } else {
+        return error.to_owned();
+    };
+    format!("usage: pastebinit [OPTION...] [FILE...]\npastebinit: error: {detail}")
 }
 
 pub fn render_help(defaults: &HelpDefaults) -> String {

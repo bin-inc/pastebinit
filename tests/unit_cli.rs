@@ -172,9 +172,12 @@ fn binary_routes_invalid_help_and_version_contexts_to_stderr() {
 fn binary_treats_help_and_version_after_terminator_as_files() {
     for arguments in [["--", "-h"], ["--", "-v"]] {
         let result = support::reference::run_rust("pastebinit", &arguments, b"", &[]);
-        assert_eq!(result.code, Some(0));
+        assert_eq!(result.code, Some(1));
         assert!(result.stdout.is_empty());
-        assert!(result.stderr.is_empty());
+        assert_eq!(
+            result.stderr,
+            format!("Error reading from: '{}'\n", arguments[1]).as_bytes()
+        );
     }
 }
 

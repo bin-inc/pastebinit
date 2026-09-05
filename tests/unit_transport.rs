@@ -222,7 +222,7 @@ fn fixture_invalid_utf8_and_no_match_use_the_reference_error() {
 }
 
 #[test]
-fn status_and_connection_failures_preserve_distinct_reqwest_categories() {
+fn status_and_connection_failures_preserve_source_compatible_categories() {
     let server = FixtureServer::spawn(vec![ResponseSpec::text(500, "failure")]);
     let status_plan = plan(
         format!("{}/submit", server.url()),
@@ -236,11 +236,7 @@ fn status_and_connection_failures_preserve_distinct_reqwest_categories() {
         .post(&status_plan)
         .err()
         .expect("HTTP 500 must fail");
-    assert!(
-        status_error
-            .message()
-            .contains("HTTP status server error (500")
-    );
+    assert_eq!(status_error.message(), "HTTP Error 500");
     let _ = server.next_request();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -257,7 +253,10 @@ fn status_and_connection_failures_preserve_distinct_reqwest_categories() {
         .post(&closed_plan)
         .err()
         .expect("closed socket must fail");
-    assert!(connection_error.message().contains("error sending request"));
+    assert_eq!(
+        connection_error.message(),
+        "<urlopen error [Errno 111] Connection refused>"
+    );
 }
 
 #[test]
