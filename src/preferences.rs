@@ -159,7 +159,7 @@ fn parse_xml_preferences(contents: &str, path: &Path) -> AppResult<UserPreferenc
                     field.value.push_str(&value);
                 }
             }
-            Ok(Event::CData(text)) if depth == 0 => return Err(xml_error(path)),
+            Ok(Event::CData(_)) if depth == 0 => return Err(xml_error(path)),
             Ok(Event::CData(_)) => {}
             Ok(Event::Empty(element)) => {
                 if depth == 0 && saw_root {

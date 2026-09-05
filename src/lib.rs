@@ -5,6 +5,7 @@ pub mod input;
 pub mod platform;
 pub mod posting;
 pub mod preferences;
+pub mod transport;
 
 pub use error::{AppError, AppResult};
 
