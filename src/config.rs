@@ -84,11 +84,7 @@ pub fn load_site_catalog(
                 .map(|section| interpolate_section(section, &path))
                 .transpose()?
                 .unwrap_or_default();
-            let defaults = sections
-                .get("defaults")
-                .map(|section| interpolate_section(section, &path))
-                .transpose()?
-                .unwrap_or_default();
+            let defaults = sections.get("defaults").cloned().unwrap_or_default();
             let site = SiteDefinition {
                 basename: basename.clone(),
                 pastebin,

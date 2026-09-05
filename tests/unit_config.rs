@@ -40,6 +40,23 @@ fn target_page_unescapes_configparser_percent_escape() {
 }
 
 #[test]
+fn catalog_preserves_defaults_interpolation_for_posting_time_variables() {
+    let mut diagnostics = Vec::new();
+    let catalog = load_site_catalog(
+        &["tests/fixtures/config/default-interpolation/pastebin.d".into()],
+        &mut diagnostics,
+    )
+    .unwrap();
+
+    let site = catalog.get("loaded.test").unwrap();
+    assert_eq!(
+        site.defaults.get("custom").map(String::as_str),
+        Some("chosen-%(format)s")
+    );
+    assert!(diagnostics.is_empty());
+}
+
+#[test]
 fn missing_interpolation_key_returns_an_error() {
     let mut diagnostics = Vec::new();
     let result = load_site_catalog(
