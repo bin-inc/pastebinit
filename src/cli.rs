@@ -38,6 +38,18 @@ impl HelpDefaults {
             expiry: String::new(),
         }
     }
+
+    pub fn with_options(
+        mut self,
+        format: impl Into<String>,
+        private: impl Into<String>,
+        expiry: impl Into<String>,
+    ) -> Self {
+        self.format = format.into();
+        self.private = private.into();
+        self.expiry = expiry.into();
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
