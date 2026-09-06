@@ -1,0 +1,29 @@
+[package]
+name = "pastebinit"
+version = "1.9.0-rc.1"
+edition = "2024"
+license = "GPL-2.0-or-later"
+description = "A native Rust command-line pastebin client compatible with pastebinit 1.8.0"
+repository = "https://github.com/bin-inc/pastebinit"
+readme = "README.md"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+gettextrs = { package = "gettext-rs", version = "0.7", features = ["gettext-system"] }
+indexmap = "2.7"
+quick-xml = "0.37"
+regex = "1.11"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+tempfile = "3.14"
+signal-hook = "0.3"
+
+[dev-dependencies]
+assert_cmd = "2.0"
+
+[[bin]]
+name = "pastebinit"
+path = "src/bin/pastebinit.rs"
+
+[[bin]]
+name = "pbput"
+path = "src/bin/pbput.rs"
