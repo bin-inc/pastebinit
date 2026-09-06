@@ -65,11 +65,53 @@ fn direct_pattern_returns_the_entire_utf8_body_after_python_stripping() {
                 None,
             ),
             "ignored",
-            b"\nhttps://paste.test/42\t",
+            b"\nhttps://paste.test/42\t\x1c\x1f",
         )
         .unwrap(),
-        "https://paste.test/42"
+        "\nhttps://paste.test/42"
     );
+}
+
+#[test]
+fn target_page_formats_one_string_argument_like_python() {
+    for (target_url, expected) in [
+        (
+            "https://example.test/show/%s",
+            "https://example.test/show/abc",
+        ),
+        (
+            "https://example.test/show/%.2s",
+            "https://example.test/show/ab",
+        ),
+        (
+            "https://example.test/show/%20s",
+            "https://example.test/show/                 abc",
+        ),
+        (
+            "https://example.test/show/%+s",
+            "https://example.test/show/abc",
+        ),
+        (
+            "https://example.test/show/%%/%s",
+            "https://example.test/show/%/abc",
+        ),
+    ] {
+        assert_eq!(
+            extract_paste_url(
+                &plan(
+                    "https://example.test/submit",
+                    "https://example.test/",
+                    EncodedBody::Form(Vec::new()),
+                    Some("id=(\\w+)"),
+                    Some(target_url),
+                ),
+                "ignored",
+                b"id=abc",
+            )
+            .unwrap(),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -92,21 +134,134 @@ fn noncapturing_regex_uses_the_post_match_split_segment() {
 }
 
 #[test]
-fn malformed_result_pages_use_the_reference_error() {
-    let invalid_utf8 = extract_paste_url(
-        &plan(
-            "https://example.test/submit",
-            "https://example.test/",
-            EncodedBody::Form(Vec::new()),
-            Some("(.*)"),
-            None,
-        ),
-        "ignored",
-        &[0xff],
-    )
-    .unwrap_err();
-    assert_eq!(invalid_utf8.message(), RESULT_PAGE_ERROR);
+fn invalid_regex_and_absent_optional_capture_use_the_reference_error() {
+    for pattern in ["(", "id=(a)?b"] {
+        let error = extract_paste_url(
+            &plan(
+                "https://example.test/submit",
+                "https://example.test/",
+                EncodedBody::Form(Vec::new()),
+                Some(pattern),
+                None,
+            ),
+            "ignored",
+            b"id=b",
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), RESULT_PAGE_ERROR);
+    }
+}
 
+#[test]
+fn invalid_percent_directives_use_the_reference_error() {
+    for target_url in [
+        "https://example.test/show",
+        "https://example.test/%%s",
+        "https://example.test/%q",
+        "https://example.test/%*s",
+    ] {
+        let error = extract_paste_url(
+            &plan(
+                "https://example.test/submit",
+                "https://example.test/",
+                EncodedBody::Form(Vec::new()),
+                Some("id=(\\d+)"),
+                Some(target_url),
+            ),
+            "ignored",
+            b"id=42",
+        )
+        .unwrap_err();
+        assert_eq!(error.message(), RESULT_PAGE_ERROR);
+    }
+}
+
+#[test]
+fn synchronous_transport_submits_without_an_async_runtime() {
+    let server = FixtureServer::spawn(vec![ResponseSpec::text(200, "https://paste.test/42")]);
+    let upload_plan = plan(
+        format!("{}/submit", server.url()),
+        format!("{}/", server.url()),
+        EncodedBody::Form(Vec::new()),
+        Some("(.*)"),
+        None,
+    );
+    assert_eq!(
+        submit_upload(&ReqwestTransport::new().unwrap(), &upload_plan).unwrap(),
+        "https://paste.test/42"
+    );
+    let _ = server.next_request();
+}
+
+#[test]
+fn fixture_invalid_utf8_and_no_match_use_the_reference_error() {
+    let invalid_utf8_server = FixtureServer::spawn(vec![ResponseSpec::text(200, vec![0xff])]);
+    let invalid_utf8_plan = plan(
+        format!("{}/submit", invalid_utf8_server.url()),
+        format!("{}/", invalid_utf8_server.url()),
+        EncodedBody::Form(Vec::new()),
+        Some("(.*)"),
+        None,
+    );
+    let invalid_utf8 =
+        submit_upload(&ReqwestTransport::new().unwrap(), &invalid_utf8_plan).unwrap_err();
+    assert_eq!(invalid_utf8.message(), RESULT_PAGE_ERROR);
+    let _ = invalid_utf8_server.next_request();
+
+    let no_match_server = FixtureServer::spawn(vec![ResponseSpec::text(200, "missing")]);
+    let no_match_plan = plan(
+        format!("{}/submit", no_match_server.url()),
+        format!("{}/", no_match_server.url()),
+        EncodedBody::Form(Vec::new()),
+        Some("id=(\\d+)"),
+        None,
+    );
+    let no_match = submit_upload(&ReqwestTransport::new().unwrap(), &no_match_plan).unwrap_err();
+    assert_eq!(no_match.message(), RESULT_PAGE_ERROR);
+    let _ = no_match_server.next_request();
+}
+
+#[test]
+fn status_and_connection_failures_preserve_distinct_reqwest_categories() {
+    let server = FixtureServer::spawn(vec![ResponseSpec::text(500, "failure")]);
+    let status_plan = plan(
+        format!("{}/submit", server.url()),
+        format!("{}/", server.url()),
+        EncodedBody::Form(Vec::new()),
+        None,
+        None,
+    );
+    let transport = ReqwestTransport::new().unwrap();
+    let status_error = transport
+        .post(&status_plan)
+        .err()
+        .expect("HTTP 500 must fail");
+    assert!(
+        status_error
+            .message()
+            .contains("HTTP status server error (500")
+    );
+    let _ = server.next_request();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let closed_url = format!("http://{}/submit", listener.local_addr().unwrap());
+    drop(listener);
+    let closed_plan = plan(
+        closed_url,
+        "http://example.test/",
+        EncodedBody::Form(Vec::new()),
+        None,
+        None,
+    );
+    let connection_error = transport
+        .post(&closed_plan)
+        .err()
+        .expect("closed socket must fail");
+    assert!(connection_error.message().contains("error sending request"));
+}
+
+#[test]
+fn no_match_remains_a_direct_extraction_error() {
     let no_match = extract_paste_url(
         &plan(
             "https://example.test/submit",
@@ -120,20 +275,6 @@ fn malformed_result_pages_use_the_reference_error() {
     )
     .unwrap_err();
     assert_eq!(no_match.message(), RESULT_PAGE_ERROR);
-
-    let invalid_format = extract_paste_url(
-        &plan(
-            "https://example.test/submit",
-            "https://example.test/",
-            EncodedBody::Form(Vec::new()),
-            Some("id=(\\d+)"),
-            Some("https://example.test/%%s"),
-        ),
-        "ignored",
-        b"id=42",
-    )
-    .unwrap_err();
-    assert_eq!(invalid_format.message(), RESULT_PAGE_ERROR);
 }
 
 #[test]
@@ -196,31 +337,4 @@ fn json_post_uses_the_exact_reference_content_type_and_raw_body() {
     assert_eq!(header(&request, "Content-Type"), "text/json");
     assert_eq!(header(&request, "User-Agent"), "Pastebinit v1.9.0-rc.1");
     assert_eq!(request.body, b"{\"content\": \"caf\\u00e9\"}");
-}
-
-#[test]
-fn status_and_connection_failures_are_returned_by_the_transport() {
-    let server = FixtureServer::spawn(vec![ResponseSpec::text(500, "failure")]);
-    let status_plan = plan(
-        format!("{}/submit", server.url()),
-        format!("{}/", server.url()),
-        EncodedBody::Form(Vec::new()),
-        None,
-        None,
-    );
-    let transport = ReqwestTransport::new().unwrap();
-    assert!(transport.post(&status_plan).is_err());
-    let _ = server.next_request();
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let closed_url = format!("http://{}/submit", listener.local_addr().unwrap());
-    drop(listener);
-    let closed_plan = plan(
-        closed_url,
-        "http://example.test/",
-        EncodedBody::Form(Vec::new()),
-        None,
-        None,
-    );
-    assert!(transport.post(&closed_plan).is_err());
 }

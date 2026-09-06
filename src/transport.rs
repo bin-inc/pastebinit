@@ -4,6 +4,7 @@ use std::time::Duration;
 use regex::Regex;
 use reqwest::header::CONTENT_TYPE;
 
+use crate::input::python_rstrip;
 use crate::posting::{EncodedBody, UploadPlan};
 use crate::{AppError, AppResult, VERSION};
 
@@ -69,9 +70,7 @@ pub fn extract_paste_url(plan: &UploadPlan, final_url: &str, body: &[u8]) -> App
     let Some(pattern) = &plan.response_pattern else {
         return Ok(final_url.to_owned());
     };
-    let result = std::str::from_utf8(body)
-        .map_err(|_| result_page_error())?
-        .trim();
+    let result = python_rstrip(std::str::from_utf8(body).map_err(|_| result_page_error())?);
     if pattern == "(.*)" {
         return Ok(result.to_owned());
     }
@@ -84,31 +83,68 @@ pub fn extract_paste_url(plan: &UploadPlan, final_url: &str, body: &[u8]) -> App
         let matched = captures.get(0).expect("successful captures has full match");
         &result[matched.end()..]
     };
-    match &plan.target_url {
-        Some(target_url) if target_url.contains("%s") => {
-            python_percent_format(target_url, extracted)
-        }
-        Some(target_url) => Ok(format!("{target_url}{extracted}")),
-        None => Ok(format!("{}{extracted}", plan.base_url)),
-    }
+    plan.target_url.as_deref().map_or_else(
+        || Ok(format!("{}{extracted}", plan.base_url)),
+        |target_url| python_percent_format(target_url, extracted),
+    )
 }
 
 fn python_percent_format(template: &str, value: &str) -> AppResult<String> {
     let mut output = String::new();
-    let mut characters = template.chars();
+    let characters: Vec<char> = template.chars().collect();
+    let mut position = 0;
     let mut substitutions = 0;
-    while let Some(character) = characters.next() {
+    while let Some(&character) = characters.get(position) {
+        position += 1;
         if character != '%' {
             output.push(character);
             continue;
         }
-        match characters.next() {
-            Some('%') => output.push('%'),
-            Some('s') if substitutions == 0 => {
-                output.push_str(value);
-                substitutions += 1;
+        if characters.get(position) == Some(&'%') {
+            output.push('%');
+            position += 1;
+            continue;
+        }
+
+        let flags_start = position;
+        while matches!(characters.get(position), Some('#' | '0' | '-' | ' ' | '+')) {
+            position += 1;
+        }
+        let width_start = position;
+        while matches!(characters.get(position), Some('0'..='9')) {
+            position += 1;
+        }
+        let width = parse_format_number(&characters[width_start..position])?;
+        let precision = if characters.get(position) == Some(&'.') {
+            position += 1;
+            let precision_start = position;
+            while matches!(characters.get(position), Some('0'..='9')) {
+                position += 1;
             }
-            _ => return Err(result_page_error()),
+            Some(parse_format_number(&characters[precision_start..position])?.unwrap_or(0))
+        } else {
+            None
+        };
+        if matches!(characters.get(position), Some('h' | 'l' | 'L')) {
+            position += 1;
+        }
+        if characters.get(position) != Some(&'s') || substitutions != 0 {
+            return Err(result_page_error());
+        }
+        position += 1;
+        substitutions += 1;
+
+        let value: String = value
+            .chars()
+            .take(precision.unwrap_or(usize::MAX))
+            .collect();
+        let padding = width.unwrap_or(0).saturating_sub(value.chars().count());
+        if !characters[flags_start..width_start].contains(&'-') {
+            output.extend(std::iter::repeat_n(' ', padding));
+            output.push_str(&value);
+        } else {
+            output.push_str(&value);
+            output.extend(std::iter::repeat_n(' ', padding));
         }
     }
     if substitutions == 1 {
@@ -116,6 +152,18 @@ fn python_percent_format(template: &str, value: &str) -> AppResult<String> {
     } else {
         Err(result_page_error())
     }
+}
+
+fn parse_format_number(characters: &[char]) -> AppResult<Option<usize>> {
+    if characters.is_empty() {
+        return Ok(None);
+    }
+    characters
+        .iter()
+        .collect::<String>()
+        .parse()
+        .map(Some)
+        .map_err(|_| result_page_error())
 }
 
 fn result_page_error() -> AppError {
