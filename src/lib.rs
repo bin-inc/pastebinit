@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod error;
+pub mod platform;
 
 pub use error::{AppError, AppResult};
 
