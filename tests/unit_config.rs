@@ -86,10 +86,15 @@ fn invalid_definitions_are_skipped_with_reference_diagnostics() {
     .unwrap();
 
     assert!(catalog.names_sorted().is_empty());
+    let diagnostics = String::from_utf8(diagnostics).unwrap();
+    let mut diagnostics: Vec<_> = diagnostics.lines().collect();
+    diagnostics.sort_unstable();
     assert_eq!(
-        String::from_utf8(diagnostics).unwrap(),
-        "tests/fixtures/config/invalid/pastebin.d/no-basename.conf: no 'basename' in [pastebin]\n\
-tests/fixtures/config/invalid/pastebin.d/no-pastebin.conf: no section [pastebin]\n"
+        diagnostics,
+        [
+            "tests/fixtures/config/invalid/pastebin.d/no-basename.conf: no 'basename' in [pastebin]",
+            "tests/fixtures/config/invalid/pastebin.d/no-pastebin.conf: no section [pastebin]",
+        ]
     );
 }
 

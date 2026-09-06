@@ -3,6 +3,7 @@ mod support;
 use std::fs;
 use std::io::Read;
 use std::net::TcpListener;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -118,6 +119,35 @@ fn pair(
 fn reference_process_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn with_bwrap_requirement<T>(
+    requirement: Option<&std::ffi::OsStr>,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let result = {
+        let _guard = reference_process_lock()
+            .lock()
+            .expect("reference process lock is not poisoned");
+        let previous = std::env::var_os("PASTEBINIT_REQUIRE_BWRAP");
+        match requirement {
+            Some(requirement) => unsafe {
+                std::env::set_var("PASTEBINIT_REQUIRE_BWRAP", requirement)
+            },
+            None => unsafe { std::env::remove_var("PASTEBINIT_REQUIRE_BWRAP") },
+        }
+
+        let result = catch_unwind(AssertUnwindSafe(operation));
+        match previous {
+            Some(previous) => unsafe { std::env::set_var("PASTEBINIT_REQUIRE_BWRAP", previous) },
+            None => unsafe { std::env::remove_var("PASTEBINIT_REQUIRE_BWRAP") },
+        }
+        result
+    };
+    match result {
+        Ok(result) => result,
+        Err(payload) => resume_unwind(payload),
+    }
 }
 
 fn assert_pair(args: &[&str], stdin: &[u8], environment: &[(String, String)]) {
@@ -722,32 +752,31 @@ fn empty_catalog_list_matches_in_bwrap_namespace() {
 fn unavailable_bwrap_skips_normally_and_fails_when_required() {
     let executable = std::env::current_exe().expect("locate differential test executable");
     let missing = std::path::Path::new("/definitely-not-a-bwrap-executable");
-    assert!(
+    let previous = std::env::var_os("PASTEBINIT_REQUIRE_BWRAP");
+    assert!(with_bwrap_requirement(None, || {
         support::reference::run_command_in_empty_catalog_namespace_with_bwrap(
             missing,
             &executable,
             &[],
             b"",
-            &[]
+            &[],
         )
         .is_none()
-    );
+    }));
 
-    let _guard = reference_process_lock()
-        .lock()
-        .expect("reference process lock is not poisoned");
-    unsafe { std::env::set_var("PASTEBINIT_REQUIRE_BWRAP", "1") };
     let strict = std::panic::catch_unwind(|| {
-        support::reference::run_command_in_empty_catalog_namespace_with_bwrap(
-            missing,
-            &executable,
-            &[],
-            b"",
-            &[],
-        )
+        with_bwrap_requirement(Some(std::ffi::OsStr::new("1")), || {
+            support::reference::run_command_in_empty_catalog_namespace_with_bwrap(
+                missing,
+                &executable,
+                &[],
+                b"",
+                &[],
+            )
+        })
     });
-    unsafe { std::env::remove_var("PASTEBINIT_REQUIRE_BWRAP") };
     assert!(strict.is_err());
+    assert_eq!(std::env::var_os("PASTEBINIT_REQUIRE_BWRAP"), previous);
 }
 
 #[test]
@@ -760,7 +789,7 @@ fn bwrap_probe_recognizes_non_privileged_user_namespace_denial() {
     );
     let executable = std::env::current_exe().expect("locate differential test executable");
 
-    assert!(
+    assert!(with_bwrap_requirement(None, || {
         support::reference::run_command_in_empty_catalog_namespace_with_bwrap(
             &bwrap,
             &executable,
@@ -769,7 +798,7 @@ fn bwrap_probe_recognizes_non_privileged_user_namespace_denial() {
             &[],
         )
         .is_none()
-    );
+    }));
 }
 
 #[test]
