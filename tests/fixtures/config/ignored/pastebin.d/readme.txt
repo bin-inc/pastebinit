@@ -1,0 +1,2 @@
+[pastebin]
+basename = text.test
