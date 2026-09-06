@@ -1,0 +1,22 @@
+.TH PASTEBINIT 1 "September 2026" "pastebinit 1.9.0" "User Commands"
+.SH NAME
+pastebinit \- command-line pastebin client
+.SH SYNOPSIS
+.B pastebinit
+.RI [ OPTION... ]
+.RI [ FILE... ]
+.SH DESCRIPTION
+.B pastebinit
+reads standard input or the specified files and submits their contents to a
+configured pastebin service.
+.SH OPTIONS
+.TP
+.B \-V
+Write the destination URL and Python-compatible encoded request bytes to
+standard error.
+.SH SECURITY
+For compatibility with pastebinit 1.8.0, verbose output includes all encoded
+parameters. In particular,
+.B \-V \-p
+writes the URL-encoded password to standard error. Do not use verbose mode
+with secrets when standard error can be logged or observed.

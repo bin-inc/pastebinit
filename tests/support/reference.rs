@@ -23,16 +23,7 @@ pub struct ProcessResult {
 pub fn run_reference(args: &[&str], stdin: &[u8], env: &[(String, String)]) -> ProcessResult {
     let executable_dir =
         tempfile::tempdir().expect("create isolated reference executable directory");
-    let executable = executable_dir.path().join("pastebinit");
-    let reference = reference_executable();
-    fs::copy(&reference, &executable).expect("copy reference pastebinit executable");
-    fs::set_permissions(
-        &executable,
-        fs::metadata(&reference)
-            .expect("read reference pastebinit permissions")
-            .permissions(),
-    )
-    .expect("preserve reference pastebinit permissions");
+    let executable = prepared_reference_executable(executable_dir.path());
     run_command(&executable, args, stdin, env)
 }
 
@@ -43,6 +34,29 @@ pub fn run_rust(
     env: &[(String, String)],
 ) -> ProcessResult {
     run_command(&assert_cmd::cargo::cargo_bin(binary), args, stdin, env)
+}
+
+pub fn prepared_reference_executable(directory: &Path) -> PathBuf {
+    fs::create_dir_all(directory).expect("create prepared reference directory");
+    let executable = directory.join("pastebinit");
+    let reference = reference_executable();
+    fs::copy(&reference, &executable).expect("copy reference pastebinit executable");
+    fs::set_permissions(
+        &executable,
+        fs::metadata(&reference)
+            .expect("read reference pastebinit permissions")
+            .permissions(),
+    )
+    .expect("preserve reference pastebinit permissions");
+    executable
+}
+
+pub fn prepared_rust_executable(binary: &str, directory: &Path) -> PathBuf {
+    fs::create_dir_all(directory).expect("create prepared Rust directory");
+    let executable = directory.join(binary);
+    fs::copy(assert_cmd::cargo::cargo_bin(binary), &executable)
+        .expect("copy Rust pastebinit executable");
+    executable
 }
 
 pub fn assert_same_process_result(reference: &ProcessResult, rust: &ProcessResult) {
@@ -131,7 +145,7 @@ fn isolated_environment() -> IsolatedEnvironment {
     }
 }
 
-fn run_command(
+pub fn run_command(
     executable: &Path,
     args: &[&str],
     stdin: &[u8],
@@ -163,6 +177,114 @@ fn run_command(
         stdout: output.stdout,
         stderr: output.stderr,
     }
+}
+
+pub fn run_command_in_empty_catalog_namespace(
+    executable: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    env: &[(String, String)],
+) -> Option<ProcessResult> {
+    run_command_in_empty_catalog_namespace_with_bwrap(
+        Path::new("bwrap"),
+        executable,
+        args,
+        stdin,
+        env,
+    )
+}
+
+pub fn run_command_in_empty_catalog_namespace_with_bwrap(
+    bwrap: &Path,
+    executable: &Path,
+    args: &[&str],
+    stdin: &[u8],
+    env: &[(String, String)],
+) -> Option<ProcessResult> {
+    let probe = match empty_catalog_namespace_command(bwrap, env)
+        .arg("true")
+        .output()
+    {
+        Ok(output) => output,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return unavailable_bwrap("bwrap executable was not found");
+        }
+        Err(error) => panic!("failed to invoke bwrap for empty-catalog differential: {error}"),
+    };
+    if !probe.status.success() {
+        if namespace_is_unavailable(&probe.stderr) {
+            return unavailable_bwrap("bwrap user namespace capability is unavailable");
+        }
+        panic!(
+            "bwrap capability probe failed:\n{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+    }
+
+    let mut command = empty_catalog_namespace_command(bwrap, env);
+    command
+        .arg(executable)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().unwrap_or_else(|error| {
+        panic!("failed to invoke bwrap for empty-catalog differential: {error}")
+    });
+    child
+        .stdin
+        .take()
+        .expect("namespaced process has stdin")
+        .write_all(stdin)
+        .expect("write namespaced process stdin");
+    let output = child
+        .wait_with_output()
+        .expect("read namespaced process output");
+    Some(ProcessResult {
+        code: output.status.code(),
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+fn empty_catalog_namespace_command(bwrap: &Path, env: &[(String, String)]) -> Command {
+    let mut command = Command::new(bwrap);
+    command
+        .args(["--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev"])
+        .args(["--tmpfs", "/usr/share"])
+        .args(["--tmpfs", "/usr/local/share"])
+        .args(["--tmpfs", "/etc"])
+        .args(["--tmpfs", "/usr/local/etc"]);
+    for variable in CLEARED_VARIABLES {
+        command.env_remove(variable);
+    }
+    command.envs(env.iter().map(|(name, value)| (name, value)));
+    if let Some((_, home)) = env.iter().find(|(name, _)| name == "HOME") {
+        command.current_dir(home);
+    }
+    command
+}
+
+fn unavailable_bwrap(reason: &str) -> Option<ProcessResult> {
+    assert_ne!(
+        std::env::var_os("PASTEBINIT_REQUIRE_BWRAP").as_deref(),
+        Some(std::ffi::OsStr::new("1")),
+        "{reason}; install bubblewrap and enable unprivileged user namespaces"
+    );
+    None
+}
+
+fn namespace_is_unavailable(stderr: &[u8]) -> bool {
+    let stderr = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let namespace_context = stderr.contains("namespace") || stderr.contains("userns");
+    let denied = stderr.contains("permission denied")
+        || stderr.contains("no permissions")
+        || stderr.contains("operation not permitted")
+        || stderr.contains("not allowed")
+        || stderr.contains("does not allow non-privileged user namespaces")
+        || stderr.contains("disabled")
+        || stderr.contains("not enabled");
+    namespace_context && denied
 }
 
 fn reference_executable() -> PathBuf {

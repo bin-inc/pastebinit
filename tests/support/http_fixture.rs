@@ -49,6 +49,22 @@ impl ResponseSpec {
             delay: Duration::ZERO,
         }
     }
+
+    pub fn chunked(status: u16, body: impl AsRef<[u8]>) -> Self {
+        let body = body.as_ref();
+        let mut framed = format!("{:X}\r\n", body.len()).into_bytes();
+        framed.extend_from_slice(body);
+        framed.extend_from_slice(b"\r\n0\r\n\r\n");
+        Self {
+            status,
+            headers: vec![
+                ("Transfer-Encoding".into(), "chunked".into()),
+                ("Connection".into(), "close".into()),
+            ],
+            body: framed,
+            delay: Duration::ZERO,
+        }
+    }
 }
 
 impl FixtureServer {
